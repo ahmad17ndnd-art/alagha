@@ -481,7 +481,9 @@ async def add_card(
 
 
 @app.post("/api/users/toggle-status")
-async def toggle_user_status(user_id: int, is_active: bool, db: Session = Depends(get_db):
+async def toggle_user_status(
+    user_id: int, is_active: bool, db: Session = Depends(get_db)
+):
   user = db.query(User).filter(User.id == user_id).first()
   if not user:
     raise HTTPException(status_code=404, detail="المستخدم غير موجود")
