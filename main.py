@@ -2,9 +2,17 @@ from datetime import datetime
 import os
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import httpx
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, create_engine
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    create_engine,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Session, sessionmaker
 import uvicorn
@@ -133,10 +141,10 @@ app.add_middleware(
 
 
 # ==============================================================================
-# 3. المسار الرئيسي (Root Endpoint)
+# 3. مسار حالة النظام (API Status Endpoint)
 # ==============================================================================
-@app.get("/")
-async def root():
+@app.get("/api/status")
+async def api_status():
   return {
       "status": "Online",
       "system": "Smart Lock SaaS Platform Pro",
@@ -266,7 +274,7 @@ async def update_notification_settings(
 
 @app.post("/api/users/link-telegram")
 async def link_telegram(user_id: int, telegram_chat_id: str, db: Session = Depends(get_db)):
-  """ربط حساب المستخدم بمعرف التيليجرام الخاص به لاستلام التنبيهات"""
+  """ربط حساب المستخدم بمعرف تيليجرام الخاص به لاستلام التنبيهات"""
   user = db.query(User).filter(User.id == user_id).first()
   if not user:
     raise HTTPException(status_code=404, detail="المستخدم غير موجود")
@@ -356,7 +364,7 @@ async def check_card_access(card_id: str, db: Session = Depends(get_db)):
     error_reason = "Outside Work Hours"
     log_entry = AccessLog(
         card_id=card_id, user_name=user_name, status_message=error_reason
-      )
+    )
     db.add(log_entry)
     db.commit()
     await notify_admins_or_user(db, error_reason, card_id)
@@ -494,14 +502,8 @@ async def toggle_user_status(
 
 
 # ==============================================================================
-# 7. نقطة تشغيل السيرفر
+# 7. واجهة المستخدم الرئيسية (Dashboard HTML Endpoint)
 # ==============================================================================
-if __name__ == "__main__":
-  print(f"🚀 Starting Smart Lock SaaS Pro Server on port {CONFIG['PORT']}...")
-  uvicorn.run(app, host="0.0.0.0", port=CONFIG["PORT"])
-from fastapi.responses import HTMLResponse
-
-
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
   return """
@@ -521,7 +523,9 @@ async def dashboard():
             </div>
 
             <!-- زر الفتح عن بعد -->
-            <div class="space-y-2">
+            <div class="space-y-3">
+                <h2 class="text-lg font-semibold text-gray-700">فتح القفل عن بعد</h2>
+                <input type="text" id="deviceId" value="ESP32_01" placeholder="معرف الجهاز (Device ID)" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <button onclick="triggerUnlock()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition duration-200 shadow-md">
                     🔓 فتح الباب عن بعد
                 </button>
@@ -553,9 +557,17 @@ async def dashboard():
             }
 
             async function triggerUnlock() {
+                const deviceId = document.getElementById('deviceId').value || 'ESP32_01';
                 try {
-                    // استبدل هذا المسار بمسار فتح الباب الفعلي لديك في الـ API إن وجد
-                    showMessage("تم إرسال أمر فتح الباب بنجاح! 🔓", true);
+                    const response = await fetch(`/api/device/${deviceId}/remote-unlock`, {
+                        method: 'POST'
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        showMessage(data.message || "تم إرسال أمر فتح الباب بنجاح! 🔓", true);
+                    } else {
+                        showMessage("فشل إرسال أمر الفتح", false);
+                    }
                 } catch (error) {
                     showMessage("حدث خطأ أثناء فتح الباب", false);
                 }
@@ -585,3 +597,11 @@ async def dashboard():
     </body>
     </html>
     """
+
+
+# ==============================================================================
+# 8. نقطة تشغيل السيرفر
+# ==============================================================================
+if __name__ == "__main__":
+  print(f"🚀 Starting Smart Lock SaaS Pro Server on port {CONFIG['PORT']}...")
+  uvicorn.run(app, host="0.0.0.0", port=CONFIG["PORT"])
