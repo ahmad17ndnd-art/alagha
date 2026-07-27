@@ -37,11 +37,9 @@ class User(Base):
   password_hash = Column(String, nullable=True)
   is_admin = Column(Boolean, default=False)
   is_active = Column(Boolean, default=True)
-  telegram_chat_id = Column(
-      String, nullable=True
-  )  # معرف تيليجرام الخاص بالمستخدم
-  notifications_enabled = Column(Boolean, default=True)  # تفعيل/إيقاف الإشعارات
-  sound_enabled = Column(Boolean, default=True)  # تفعيل/إيقاف صوت الإشعار
+  telegram_chat_id = Column(String, nullable=True)
+  notifications_enabled = Column(Boolean, default=True)
+  sound_enabled = Column(Boolean, default=True)
 
 
 # جدول الكروت والصلاحيات
@@ -98,7 +96,7 @@ CONFIG = {
         "034269901652-sftbqggk6morgtebdmchkubbt4ohuuci.apps.googleusercontent.com"
     ),
     "GOOGLE_CLIENT_SECRET": "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",
-    "GOOGLE_REDIRECT_URI": "http://localhost:3000/auth/google/callback",
+    "GOOGLE_REDIRECT_URI": "https://alagha-w1e2.onrender.com/auth/google/callback",
     "SUPER_ADMIN_EMAIL": "ahmad17ndnd@gmail.com",
     "TELEGRAM_BOT_TOKEN": "8915690581:AAH15aBE6EvmjQQcRN1Pdyjrh7uQIJijkmo",
 }
@@ -107,16 +105,13 @@ CONFIG = {
 async def send_telegram_alert(
     chat_id: str, message: str, sound_enabled: bool = True
 ):
-  """دالة لإرسال إشعارات تيليجرام مع التحكم بالصوت"""
   if not chat_id:
     return
   url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
   payload = {
       "chat_id": chat_id,
       "text": message,
-      "disable_notification": (
-          not sound_enabled
-      ),  # إذا كان الصوت مفصولاً، يُرسل إشعار صامت
+      "disable_notification": not sound_enabled,
   }
   async with httpx.AsyncClient() as client:
     try:
@@ -162,7 +157,7 @@ async def api_status():
 
 
 # ==============================================================================
-# 4. مسارات المصادقة وتسجيل الدخول وتطبيقات الإشعارات
+# 4. مسارات المصادقة وتسجيل الدخول عبر Google
 # ==============================================================================
 @app.get("/auth/google/login")
 async def google_login():
@@ -224,31 +219,8 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
   if not user.is_active:
     raise HTTPException(status_code=403, detail="هذا الحساب محظور من قبل الإدارة")
 
-  return {
-      "status": "success",
-      "message": "تم تسجيل الدخول بنجاح عبر Google",
-      "user_id": user.id,
-      "is_super_admin": user.is_admin,
-      "user_details": {
-          "name": user.name,
-          "email": user.email,
-          "profile_pic": user_data.get("picture"),
-          "telegram_chat_id": user.telegram_chat_id,
-          "notifications_enabled": user.notifications_enabled,
-          "sound_enabled": user.sound_enabled,
-      },
-  }
-
-
-@app.post("/auth/set-password")
-async def set_password(email: str, new_password: str, db: Session = Depends(get_db)):
-  user = db.query(User).filter(User.email == email).first()
-  if not user:
-    raise HTTPException(status_code=404, detail="المستخدم غير موجود")
-
-  user.password_hash = new_password
-  db.commit()
-  return {"status": "success", "message": "تم تحديث كلمة المرور بنجاح"}
+  # إعادة توجيه المستخدم للواجهة مع تمرير المعرف
+  return RedirectResponse(url=f"/?logged_in=true&user_id={user.id}&name={name}")
 
 
 @app.post("/api/users/notification-settings")
@@ -258,37 +230,31 @@ async def update_notification_settings(
     sound_enabled: bool,
     db: Session = Depends(get_db),
 ):
-  """ميزة من التطبيق: تشغيل/إيقاف الإشعارات أو إيقاف الصوت فقط"""
   user = db.query(User).filter(User.id == user_id).first()
   if not user:
     raise HTTPException(status_code=404, detail="المستخدم غير موجود")
-
   user.notifications_enabled = notifications_enabled
   user.sound_enabled = sound_enabled
   db.commit()
-  return {
-      "status": "success",
-      "message": "تم تحديث إعدادات الإشعارات بنجاح",
-  }
+  return {"status": "success", "message": "تم تحديث إعدادات الإشعارات بنجاح"}
 
 
 @app.post("/api/users/link-telegram")
-async def link_telegram(user_id: int, telegram_chat_id: str, db: Session = Depends(get_db)):
-  """ربط حساب المستخدم بمعرف تيليجرام الخاص به لاستلام التنبيهات"""
+async def link_telegram(
+    user_id: int, telegram_chat_id: str, db: Session = Depends(get_db)
+):
   user = db.query(User).filter(User.id == user_id).first()
   if not user:
     raise HTTPException(status_code=404, detail="المستخدم غير موجود")
-
   user.telegram_chat_id = telegram_chat_id
   db.commit()
   return {"status": "success", "message": "تم ربط حساب Telegram بنجاح"}
 
 
 # ==============================================================================
-# 5. مسارات أجهزة ESP32 (التحقق وإرسال تنبيهات تيليجرام الفورية عند الرفض)
+# 5. مسارات أجهزة ESP32 والتحقق والتنبيهات
 # ==============================================================================
 async def notify_admins_or_user(db: Session, error_msg: str, card_id: str):
-  """دالة مساعدة لإرسال إشعارات فورية لكل المشرفين أو المستخدمين المفعلين لديهم الإشعارات"""
   admins = (
       db.query(User)
       .filter(
@@ -300,7 +266,6 @@ async def notify_admins_or_user(db: Session, error_msg: str, card_id: str):
       f"🚨 تنبيه أمني خطير!\nمحاولة دخول مرفوضة.\n- سبب الرفض: {error_msg}\n- رقم"
       f" الكرت: {card_id}\n- الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
   )
-
   for admin in admins:
     if admin.telegram_chat_id:
       await send_telegram_alert(
@@ -310,23 +275,18 @@ async def notify_admins_or_user(db: Session, error_msg: str, card_id: str):
 
 @app.get("/api/cards/check")
 async def check_card_access(card_id: str, db: Session = Depends(get_db)):
-  """فحص البطاقة وتسجيل الحركة مع إرسال تنبيه فوري عبر تيليجرام عند الرفض"""
-
   card = db.query(Card).filter(Card.card_id == card_id).first()
-
   if not card or not card.is_active:
     error_reason = "Card Inactive / Not Found"
-    log_entry = AccessLog(
-        card_id=card_id,
-        user_name="مجهول / غير مسجل",
-        status_message=f"Access Denied: {error_reason}",
+    db.add(
+        AccessLog(
+            card_id=card_id,
+            user_name="مجهول",
+            status_message=f"Denied: {error_reason}",
+        )
     )
-    db.add(log_entry)
     db.commit()
-
-    # إرسال إشعار تيليجرام فوري
     await notify_admins_or_user(db, error_reason, card_id)
-
     return JSONResponse(
         status_code=403, content={"access": False, "message": error_reason}
     )
@@ -336,10 +296,11 @@ async def check_card_access(card_id: str, db: Session = Depends(get_db)):
 
   if not user or not user.is_active:
     error_reason = "User Blocked"
-    log_entry = AccessLog(
-        card_id=card_id, user_name=user_name, status_message=error_reason
+    db.add(
+        AccessLog(
+            card_id=card_id, user_name=user_name, status_message=error_reason
+        )
     )
-    db.add(log_entry)
     db.commit()
     await notify_admins_or_user(db, error_reason, card_id)
     return JSONResponse(
@@ -349,10 +310,11 @@ async def check_card_access(card_id: str, db: Session = Depends(get_db)):
   if card.is_temporary and card.expiry_time:
     if datetime.now() > card.expiry_time:
       error_reason = "Temporary Card Expired"
-      log_entry = AccessLog(
-          card_id=card_id, user_name=user_name, status_message=error_reason
+      db.add(
+          AccessLog(
+              card_id=card_id, user_name=user_name, status_message=error_reason
+          )
       )
-      db.add(log_entry)
       db.commit()
       await notify_admins_or_user(db, error_reason, card_id)
       return JSONResponse(
@@ -362,45 +324,43 @@ async def check_card_access(card_id: str, db: Session = Depends(get_db)):
   current_hour = datetime.now().hour
   if not (card.start_hour <= current_hour < card.end_hour):
     error_reason = "Outside Work Hours"
-    log_entry = AccessLog(
-        card_id=card_id, user_name=user_name, status_message=error_reason
+    db.add(
+        AccessLog(
+            card_id=card_id, user_name=user_name, status_message=error_reason
+        )
     )
-    db.add(log_entry)
     db.commit()
     await notify_admins_or_user(db, error_reason, card_id)
     return JSONResponse(
         status_code=403, content={"access": False, "message": error_reason}
     )
 
-  # نجاح الدخول
-  log_entry = AccessLog(
-      card_id=card_id,
-      user_name=user_name,
-      status_message="Access Granted (Success)",
+  db.add(
+      AccessLog(
+          card_id=card_id,
+          user_name=user_name,
+          status_message="Access Granted",
+      )
   )
-  db.add(log_entry)
   db.commit()
-
   return JSONResponse(
       status_code=200,
       content={
           "access": True,
           "message": "Access Granted",
           "user_name": user_name,
-          "card_id": card_id,
       },
   )
 
 
 # ==============================================================================
-# 6. مسارات الإدارة والتليجرام Webhook
+# 6. مسارات الإدارة وسجلات الدخول والتحكم
 # ==============================================================================
 @app.get("/api/logs")
 async def get_access_logs(db: Session = Depends(get_db)):
   logs = db.query(AccessLog).order_by(AccessLog.timestamp.desc()).all()
   return {
       "status": "success",
-      "total_logs": len(logs),
       "logs": [
           {
               "id": log.id,
@@ -416,12 +376,10 @@ async def get_access_logs(db: Session = Depends(get_db)):
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
-  """استقبال رسائل تيليجرام (يمكن للمستخدم إرسال /start لربط حسابه تلقائياً)"""
   data = await request.json()
   if "message" in data:
     chat_id = data["message"]["chat"]["id"]
     text = data["message"].get("text", "")
-
     if text == "/start":
       async with httpx.AsyncClient() as client:
         await client.post(
@@ -429,9 +387,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             json={
                 "chat_id": chat_id,
                 "text": (
-                    "مرحباً بك في نظام Smart Lock. لاستلام التنبيهات الأمنية،"
-                    " يرجى ربط حسابك عبر التطبيق أو تزويدنا برمزك التعريفي"
-                    f" (Chat ID الخاص بك هو: {chat_id})."
+                    "مرحباً بك في نظام Smart Lock. معرف الدردشة الخاص بك هو:"
+                    f" {chat_id}"
                 ),
             },
         )
@@ -465,14 +422,20 @@ async def add_card(
     user_id: int,
     card_id: str,
     is_temporary: bool = False,
-    expiry_time: datetime = None,
+    expiry_hours: int = 24,
     start_hour: int = 0,
     end_hour: int = 24,
     db: Session = Depends(get_db),
 ):
-  existing_card = db.query(Card).filter(Card.card_id == card_id).first()
-  if existing_card:
+  existing = db.query(Card).filter(Card.card_id == card_id).first()
+  if existing:
     raise HTTPException(status_code=400, detail="هذه البطاقة مسجلة مسبقاً")
+
+  expiry_time = None
+  if is_temporary:
+    from datetime import timedelta
+
+    expiry_time = datetime.now() + timedelta(hours=expiry_hours)
 
   new_card = Card(
       user_id=user_id,
@@ -485,7 +448,7 @@ async def add_card(
   )
   db.add(new_card)
   db.commit()
-  return {"status": "success", "message": "تمت إضافة البطاقة وتفعيلها بنجاح"}
+  return {"status": "success", "message": "تمت إضافة وتفعيل البطاقة بنجاح"}
 
 
 @app.post("/api/users/toggle-status")
@@ -497,12 +460,12 @@ async def toggle_user_status(
     raise HTTPException(status_code=404, detail="المستخدم غير موجود")
   user.is_active = is_active
   db.commit()
-  status_text = "تم تفعيل" if is_active else "تم حظر"
-  return {"status": "success", "message": f"{status_text} المستخدم بنجاح"}
+  status_text = "تفعيل" if is_active else "حظر"
+  return {"status": "success", "message": f"تم {status_text} المستخدم بنجاح"}
 
 
 # ==============================================================================
-# 7. واجهة المستخدم الرئيسية (Dashboard HTML Endpoint)
+# 7. واجهة المستخدم المتكاملة (SaaS Dashboard HTML)
 # ==============================================================================
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -512,85 +475,222 @@ async def dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>لوحة تحكم القفل الذكي</title>
+        <title>لوحة تحكم القفل الذكي SaaS Pro</title>
         <script src="https://cdn.tailwindcss.com"></script>
     </head>
-    <body class="bg-gray-100 font-sans min-h-screen flex flex-col items-center justify-center p-4">
-        <div class="max-w-md w-full bg-white rounded-xl shadow-lg p-6 space-y-6">
-            <div class="text-center">
-                <h1 class="text-2xl font-bold text-gray-800">🔒 لوحة تحكم الأقفال الذكية</h1>
-                <p class="text-sm text-gray-500 mt-1">SaaS Smart Lock Dashboard</p>
-            </div>
-
-            <!-- زر الفتح عن بعد -->
-            <div class="space-y-3">
-                <h2 class="text-lg font-semibold text-gray-700">فتح القفل عن بعد</h2>
-                <input type="text" id="deviceId" value="ESP32_01" placeholder="معرف الجهاز (Device ID)" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <button onclick="triggerUnlock()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition duration-200 shadow-md">
-                    🔓 فتح الباب عن بعد
-                </button>
-            </div>
-
-            <hr class="border-gray-200">
-
-            <!-- إدارة المستخدمين -->
-            <div class="space-y-3">
-                <h2 class="text-lg font-semibold text-gray-700">إدارة حالة المستخدم</h2>
-                <input type="number" id="userId" placeholder="رقم المستخدم (User ID)" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <div class="flex gap-2">
-                    <button onclick="updateUserStatus(true)" class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 rounded-lg transition">تفعيل</button>
-                    <button onclick="updateUserStatus(false)" class="flex-1 bg-red-600 hover:bg-red-700 text-white py-2 rounded-lg transition">حظر</button>
+    <body class="bg-gray-50 font-sans min-h-screen p-4 md:p-8">
+        <div class="max-w-4xl mx-auto space-y-6">
+            
+            <!-- رأس الصفحة وتوثيق جوجل -->
+            <div class="bg-white rounded-2xl shadow-sm p-6 flex flex-col md:flex-row justify-between items-center gap-4">
+                <div>
+                    <h1 class="text-2xl font-bold text-gray-800">🔒 لوحة تحكم الأقفال الذكية</h1>
+                    <p class="text-sm text-gray-500 mt-1">SaaS Smart Lock Dashboard & Management</p>
+                </div>
+                <div id="authSection">
+                    <a href="/auth/google/login" class="flex items-center gap-2 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium py-2 px-4 rounded-xl shadow-sm transition">
+                        <svg class="w-5 h-5" viewBox="0 0 24 24"><path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/><path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.18v3.15C3.16 21.32 7.23 24 12 24z"/><path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.6H1.18C.43 8.13 0 9.87 0 12s.43 3.87 1.18 5.4l4.09-3.16z"/><path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.23 0 3.16 2.68 1.18 6.6l4.09 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/></svg>
+                        تسجيل الدخول باستخدام Google
+                    </a>
                 </div>
             </div>
 
-            <!-- صندوق الردود -->
-            <div id="responseMessage" class="hidden p-3 rounded-lg text-sm text-center"></div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                <!-- قسم فتح القفل عن بعد -->
+                <div class="bg-white rounded-2xl shadow-sm p-6 space-y-4">
+                    <h2 class="text-lg font-semibold text-gray-700">🔓 التحكم بالأجهزة</h2>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">معرف الجهاز (Device ID)</label>
+                        <input type="text" id="deviceId" value="ESP32_01" class="w-full px-4 py-2 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <button onclick="triggerUnlock()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-xl transition shadow-md">
+                        إرسال أمر فتح الباب
+                    </button>
+                </div>
+
+                <!-- قسم إدارة المستخدمين (تفعيل / حظر) -->
+                <div class="bg-white rounded-2xl shadow-sm p-6 space-y-4">
+                    <h2 class="text-lg font-semibold text-gray-700">👥 إدارة حالة المستخدم</h2>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">رقم المستخدم (User ID)</label>
+                        <input type="number" id="userId" placeholder="مثال: 1" class="w-full px-4 py-2 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <div class="flex gap-2 pt-2">
+                        <button onclick="updateUserStatus(true)" class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2.5 rounded-xl transition">تفعيل</button>
+                        <button onclick="updateUserStatus(false)" class="flex-1 bg-red-600 hover:bg-red-700 text-white py-2.5 rounded-xl transition">حظر</button>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- قسم إضافة بطاقة وعمليات البطاقات المؤقتة -->
+            <div class="bg-white rounded-2xl shadow-sm p-6 space-y-4">
+                <h2 class="text-lg font-semibold text-gray-700">💳 إضافة بطاقة / صلاحية مؤقتة</h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <input type="number" id="cardUserId" placeholder="رقم المستخدم (User ID)" class="px-4 py-2 border rounded-xl">
+                    <input type="text" id="cardIdVal" placeholder="رقم البطاقة (Card UID)" class="px-4 py-2 border rounded-xl">
+                    <select id="isTemp" class="px-4 py-2 border rounded-xl" onchange="toggleTempOptions()">
+                        <option value="false">بطاقة دائمة</option>
+                        <option value="true">بطاقة مؤقتة / زائر</option>
+                    </select>
+                </div>
+                <div id="tempOptions" class="hidden grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">عدد ساعات الصلاحية</label>
+                        <input type="number" id="expiryHours" value="24" class="w-full px-4 py-2 border rounded-xl">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">ساعة البدء (0-23)</label>
+                        <input type="number" id="startHour" value="0" class="w-full px-4 py-2 border rounded-xl">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">ساعة الانتهاء (0-23)</label>
+                        <input type="number" id="endHour" value="24" class="w-full px-4 py-2 border rounded-xl">
+                    </div>
+                </div>
+                <button onclick="addNewCard()" class="w-full bg-purple-600 hover:bg-purple-700 text-white py-3 rounded-xl transition shadow-md">
+                    حفظ وإضافة البطاقة للنظام
+                </button>
+            </div>
+
+            <!-- جدول سجلات الحركات (Access Logs) -->
+            <div class="bg-white rounded-2xl shadow-sm p-6 space-y-4">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-lg font-semibold text-gray-700">📊 سجلات الحركة والدخول</h2>
+                    <button onclick="loadLogs()" class="text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1.5 rounded-lg transition">تحديث السجلات</button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-right border-collapse">
+                        <thead>
+                            <tr class="border-b text-sm text-gray-500">
+                                <th class="p-3">المستخدم</th>
+                                <th class="p-3">رقم البطاقة</th>
+                                <th class="p-3">الحالة / النتيجة</th>
+                                <th class="p-3">التوقيت</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logsTableBody" class="text-sm text-gray-700">
+                            <tr><td colspan="4" class="p-4 text-center text-gray-400">جاري تحميل السجلات...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- صندوق الإشعارات والتنبيهات -->
+            <div id="responseMessage" class="hidden p-4 rounded-xl text-sm text-center font-medium shadow-sm"></div>
+
         </div>
 
         <script>
+            // التحقق من حالة تسجيل الدخول عبر بارامترات الرابط
+            window.onload = function() {
+                const urlParams = new URLSearchParams(window.location.search);
+                if (urlParams.get('logged_in') === 'true') {
+                    const name = urlParams.get('name');
+                    document.getElementById('authSection').innerHTML = `
+                        <div class="flex items-center gap-3 bg-green-50 text-green-700 px-4 py-2 rounded-xl border border-green-200">
+                            <span class="font-medium">👋 أهلاً بك، ${name}</span>
+                        </div>
+                    `;
+                }
+                loadLogs();
+            };
+
+            function toggleTempOptions() {
+                const isTemp = document.getElementById('isTemp').value === 'true';
+                const tempDiv = document.getElementById('tempOptions');
+                if (isTemp) {
+                    tempDiv.classList.remove('hidden');
+                } else {
+                    tempDiv.classList.add('hidden');
+                }
+            }
+
             async function showMessage(text, isSuccess) {
                 const box = document.getElementById('responseMessage');
                 box.textContent = text;
-                box.className = `p-3 rounded-lg text-sm text-center ${isSuccess ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`;
+                box.className = `p-4 rounded-xl text-sm text-center font-medium shadow-sm ${isSuccess ? 'bg-green-100 text-green-700 border border-green-200' : 'bg-red-100 text-red-700 border border-red-200'}`;
                 box.classList.remove('hidden');
-                setTimeout(() => box.classList.add('hidden'), 4000);
+                setTimeout(() => box.classList.add('hidden'), 5000);
             }
 
             async function triggerUnlock() {
                 const deviceId = document.getElementById('deviceId').value || 'ESP32_01';
                 try {
-                    const response = await fetch(`/api/device/${deviceId}/remote-unlock`, {
-                        method: 'POST'
-                    });
-                    const data = await response.json();
-                    if (response.ok) {
-                        showMessage(data.message || "تم إرسال أمر فتح الباب بنجاح! 🔓", true);
-                    } else {
-                        showMessage("فشل إرسال أمر الفتح", false);
-                    }
-                } catch (error) {
-                    showMessage("حدث خطأ أثناء فتح الباب", false);
+                    const res = await fetch(`/api/device/${deviceId}/remote-unlock`, { method: 'POST' });
+                    const data = await res.json();
+                    if (res.ok) showMessage(data.message, true);
+                    else showMessage("فشل فتح الباب", false);
+                } catch (e) {
+                    showMessage("خطأ في الاتصال بالخادم", false);
                 }
             }
 
             async function updateUserStatus(isActive) {
                 const userId = document.getElementById('userId').value;
-                if (!userId) {
-                    showMessage("الرجاء إدخال رقم المستخدم أولاً", false);
+                if (!userId) { showMessage("الرجاء إدخال رقم المستخدم", false); return; }
+                try {
+                    const res = await fetch(`/api/users/toggle-status?user_id=${userId}&is_active=${isActive}`, { method: 'POST' });
+                    const data = await res.json();
+                    if (res.ok) showMessage(data.message, true);
+                    else showMessage("فشل تحديث حالة المستخدم", false);
+                } catch (e) {
+                    showMessage("خطأ في الاتصال بالخادم", false);
+                }
+            }
+
+            async function addNewCard() {
+                const userId = document.getElementById('cardUserId').value;
+                const cardId = document.getElementById('cardIdVal').value;
+                const isTemp = document.getElementById('isTemp').value;
+                const expiryHours = document.getElementById('expiryHours').value;
+                const startHour = document.getElementById('startHour').value;
+                const endHour = document.getElementById('endHour').value;
+
+                if (!userId || !cardId) {
+                    showMessage("الرجاء إدخال رقم المستخدم ورقم البطاقة", false);
                     return;
                 }
+
                 try {
-                    const response = await fetch(`/api/users/toggle-status?user_id=${userId}&is_active=${isActive}`, {
-                        method: 'POST'
-                    });
-                    const data = await response.json();
-                    if (response.ok) {
-                        showMessage(data.message || "تم تحديث حالة المستخدم بنجاح", true);
+                    const url = `/api/cards/add?user_id=${userId}&card_id=${cardId}&is_temporary=${isTemp}&expiry_hours=${expiryHours}&start_hour=${startHour}&end_hour=${endHour}`;
+                    const res = await fetch(url, { method: 'POST' });
+                    const data = await res.json();
+                    if (res.ok) {
+                        showMessage(data.message, true);
+                        loadLogs();
                     } else {
-                        showMessage("فشل التحديث: تأكد من رقم المستخدم", false);
+                        showMessage(data.detail || "فشل إضافة البطاقة", false);
                     }
-                } catch (error) {
+                } catch (e) {
                     showMessage("خطأ في الاتصال بالخادم", false);
+                }
+            }
+
+            async function loadLogs() {
+                try {
+                    const res = await fetch('/api/logs');
+                    const data = await res.json();
+                    const tbody = document.getElementById('logsTableBody');
+                    if (data.logs && data.logs.length > 0) {
+                        tbody.innerHTML = data.logs.map(log => `
+                            <tr class="border-b hover:bg-gray-50">
+                                <td class="p-3 font-medium">${log.user_name}</td>
+                                <td class="p-3 text-gray-500">${log.card_id}</td>
+                                <td class="p-3">
+                                    <span class="px-2.5 py-1 rounded-full text-xs font-semibold ${log.status.includes('Granted') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
+                                        ${log.status}
+                                    </span>
+                                </td>
+                                <td class="p-3 text-gray-400 text-xs">${log.timestamp}</td>
+                            </tr>
+                        `).join('');
+                    } else {
+                        tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-gray-400">لا توجد سجلات حركات حتى الآن</td></tr>`;
+                    }
+                } catch (e) {
+                    console.error("Failed to load logs");
                 }
             }
         </script>
