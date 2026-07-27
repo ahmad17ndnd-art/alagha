@@ -499,3 +499,89 @@ async def toggle_user_status(
 if __name__ == "__main__":
   print(f"🚀 Starting Smart Lock SaaS Pro Server on port {CONFIG['PORT']}...")
   uvicorn.run(app, host="0.0.0.0", port=CONFIG["PORT"])
+from fastapi.responses import HTMLResponse
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+  return """
+    <!DOCTYPE html>
+    <html lang="ar" dir="rtl">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>لوحة تحكم القفل الذكي</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-gray-100 font-sans min-h-screen flex flex-col items-center justify-center p-4">
+        <div class="max-w-md w-full bg-white rounded-xl shadow-lg p-6 space-y-6">
+            <div class="text-center">
+                <h1 class="text-2xl font-bold text-gray-800">🔒 لوحة تحكم الأقفال الذكية</h1>
+                <p class="text-sm text-gray-500 mt-1">SaaS Smart Lock Dashboard</p>
+            </div>
+
+            <!-- زر الفتح عن بعد -->
+            <div class="space-y-2">
+                <button onclick="triggerUnlock()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition duration-200 shadow-md">
+                    🔓 فتح الباب عن بعد
+                </button>
+            </div>
+
+            <hr class="border-gray-200">
+
+            <!-- إدارة المستخدمين -->
+            <div class="space-y-3">
+                <h2 class="text-lg font-semibold text-gray-700">إدارة حالة المستخدم</h2>
+                <input type="number" id="userId" placeholder="رقم المستخدم (User ID)" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <div class="flex gap-2">
+                    <button onclick="updateUserStatus(true)" class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 rounded-lg transition">تفعيل</button>
+                    <button onclick="updateUserStatus(false)" class="flex-1 bg-red-600 hover:bg-red-700 text-white py-2 rounded-lg transition">حظر</button>
+                </div>
+            </div>
+
+            <!-- صندوق الردود -->
+            <div id="responseMessage" class="hidden p-3 rounded-lg text-sm text-center"></div>
+        </div>
+
+        <script>
+            async function showMessage(text, isSuccess) {
+                const box = document.getElementById('responseMessage');
+                box.textContent = text;
+                box.className = `p-3 rounded-lg text-sm text-center ${isSuccess ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`;
+                box.classList.remove('hidden');
+                setTimeout(() => box.classList.add('hidden'), 4000);
+            }
+
+            async function triggerUnlock() {
+                try {
+                    // استبدل هذا المسار بمسار فتح الباب الفعلي لديك في الـ API إن وجد
+                    showMessage("تم إرسال أمر فتح الباب بنجاح! 🔓", true);
+                } catch (error) {
+                    showMessage("حدث خطأ أثناء فتح الباب", false);
+                }
+            }
+
+            async function updateUserStatus(isActive) {
+                const userId = document.getElementById('userId').value;
+                if (!userId) {
+                    showMessage("الرجاء إدخال رقم المستخدم أولاً", false);
+                    return;
+                }
+                try {
+                    const response = await fetch(`/api/users/toggle-status?user_id=${userId}&is_active=${isActive}`, {
+                        method: 'POST'
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        showMessage(data.message || "تم تحديث حالة المستخدم بنجاح", true);
+                    } else {
+                        showMessage("فشل التحديث: تأكد من رقم المستخدم", false);
+                    }
+                } catch (error) {
+                    showMessage("خطأ في الاتصال بالخادم", false);
+                }
+            }
+        </script>
+    </body>
+    </html>
+    """
