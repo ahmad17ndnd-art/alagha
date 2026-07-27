@@ -20,7 +20,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-# جدول المستخدمين
+# جدول المستخدمين (مع إضافات إعدادات الإشعارات وتيليجرام)
 class User(Base):
   __tablename__ = "users"
   id = Column(Integer, primary_key=True, index=True)
@@ -29,6 +29,11 @@ class User(Base):
   password_hash = Column(String, nullable=True)
   is_admin = Column(Boolean, default=False)
   is_active = Column(Boolean, default=True)
+  telegram_chat_id = Column(
+      String, nullable=True
+  )  # معرف تيليجرام الخاص بالمستخدم
+  notifications_enabled = Column(Boolean, default=True)  # تفعيل/إيقاف الإشعارات
+  sound_enabled = Column(Boolean, default=True)  # تفعيل/إيقاف صوت الإشعار
 
 
 # جدول الكروت والصلاحيات
@@ -44,13 +49,23 @@ class Card(Base):
   is_active = Column(Boolean, default=True)
 
 
-# جدول الأجهزة (ESP32) لإدارة حالة القفل وأوامر الفتح عن بعد
+# جدول الأجهزة (ESP32)
 class Device(Base):
   __tablename__ = "devices"
   id = Column(Integer, primary_key=True, index=True)
-  device_id = Column(String, unique=True, index=True)  # معرف قفل الباب أو الـ ESP32
-  unlock_requested = Column(Boolean, default=False)  # هل طلب المستخدم الفتح عن بعد؟
+  device_id = Column(String, unique=True, index=True)
+  unlock_requested = Column(Boolean, default=False)
   is_online = Column(Boolean, default=True)
+
+
+# جدول سجل الحركات
+class AccessLog(Base):
+  __tablename__ = "access_logs"
+  id = Column(Integer, primary_key=True, index=True)
+  card_id = Column(String)
+  user_name = Column(String)
+  status_message = Column(String)
+  timestamp = Column(DateTime, default=datetime.now)
 
 
 # إنشاء الجداول
@@ -66,7 +81,7 @@ def get_db():
 
 
 # ==============================================================================
-# 2. إعداد المتغيرات البيئية والتكوين
+# 2. إعداد المتغيرات البيئية والتكوين والدوال المساعدة
 # ==============================================================================
 CONFIG = {
     "PORT": 3000,
@@ -80,12 +95,32 @@ CONFIG = {
     "TELEGRAM_BOT_TOKEN": "8915690581:AAH15aBE6EvmjQQcRN1Pdyjrh7uQIJijkmo",
 }
 
+
+async def send_telegram_alert(
+    chat_id: str, message: str, sound_enabled: bool = True
+):
+  """دالة لإرسال إشعارات تيليجرام مع التحكم بالصوت"""
+  if not chat_id:
+    return
+  url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
+  payload = {
+      "chat_id": chat_id,
+      "text": message,
+      "disable_notification": (
+          not sound_enabled
+      ),  # إذا كان الصوت مفصولاً، يُرسل إشعار صامت
+  }
+  async with httpx.AsyncClient() as client:
+    try:
+      await client.post(url, json=payload)
+    except Exception as e:
+      print(f"Telegram Error: {e}")
+
+
 app = FastAPI(
     title="Smart Lock SaaS Platform",
-    description=(
-        "Advanced SaaS Backend with DB, Schedules, Permissions & Remote Unlock"
-    ),
-    version="2.1.0",
+    description="Advanced SaaS Backend with Telegram Alerts & Sound Controls",
+    version="2.3.0",
 )
 
 app.add_middleware(
@@ -112,12 +147,14 @@ async def root():
           "Work Hours Schedule",
           "Password Management",
           "Remote Door Unlock",
+          "Access Logs & History",
+          "Telegram Alerts with Sound & Notification Controls",
       ],
   }
 
 
 # ==============================================================================
-# 4. مسارات المصادقة وتسجيل الدخول
+# 4. مسارات المصادقة وتسجيل الدخول وتطبيقات الإشعارات
 # ==============================================================================
 @app.get("/auth/google/login")
 async def google_login():
@@ -164,7 +201,14 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
 
   user = db.query(User).filter(User.email == email).first()
   if not user:
-    user = User(email=email, name=name, is_admin=is_admin, is_active=True)
+    user = User(
+        email=email,
+        name=name,
+        is_admin=is_admin,
+        is_active=True,
+        notifications_enabled=True,
+        sound_enabled=True,
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -181,6 +225,9 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
           "name": user.name,
           "email": user.email,
           "profile_pic": user_data.get("picture"),
+          "telegram_chat_id": user.telegram_chat_id,
+          "notifications_enabled": user.notifications_enabled,
+          "sound_enabled": user.sound_enabled,
       },
   }
 
@@ -196,97 +243,213 @@ async def set_password(email: str, new_password: str, db: Session = Depends(get_
   return {"status": "success", "message": "تم تحديث كلمة المرور بنجاح"}
 
 
+@app.post("/api/users/notification-settings")
+async def update_notification_settings(
+    user_id: int,
+    notifications_enabled: bool,
+    sound_enabled: bool,
+    db: Session = Depends(get_db),
+):
+  """ميزة من التطبيق: تشغيل/إيقاف الإشعارات أو إيقاف الصوت فقط"""
+  user = db.query(User).filter(User.id == user_id).first()
+  if not user:
+    raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+
+  user.notifications_enabled = notifications_enabled
+  user.sound_enabled = sound_enabled
+  db.commit()
+  return {
+      "status": "success",
+      "message": "تم تحديث إعدادات الإشعارات بنجاح",
+  }
+
+
+@app.post("/api/users/link-telegram")
+async def link_telegram(user_id: int, telegram_chat_id: str, db: Session = Depends(get_db)):
+  """ربط حساب المستخدم بمعرف التيليجرام الخاص به لاستلام التنبيهات"""
+  user = db.query(User).filter(User.id == user_id).first()
+  if not user:
+    raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+
+  user.telegram_chat_id = telegram_chat_id
+  db.commit()
+  return {"status": "success", "message": "تم ربط حساب Telegram بنجاح"}
+
+
 # ==============================================================================
-# 5. مسارات أجهزة ESP32 (التحقق من البطاقات والأوامر عن بعد)
+# 5. مسارات أجهزة ESP32 (التحقق وإرسال تنبيهات تيليجرام الفورية عند الرفض)
 # ==============================================================================
+async def notify_admins_or_user(db: Session, error_msg: str, card_id: str):
+  """دالة مساعدة لإرسال إشعارات فورية لكل المشرفين أو المستخدمين المفعلين لديهم الإشعارات"""
+  admins = (
+      db.query(User)
+      .filter(
+          (User.is_admin == True) & (User.notifications_enabled == True)
+      )
+      .all()
+  )
+  alert_text = (
+      f"🚨 تنبيه أمني خطير!\nمحاولة دخول مرفوضة.\n- سبب الرفض: {error_msg}\n- رقم"
+      f" الكرت: {card_id}\n- الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+  )
+
+  for admin in admins:
+    if admin.telegram_chat_id:
+      await send_telegram_alert(
+          admin.telegram_chat_id, alert_text, admin.sound_enabled
+      )
+
+
 @app.get("/api/cards/check")
 async def check_card_access(card_id: str, db: Session = Depends(get_db)):
-  """فحص البطاقة الواردة من ESP32 والتحقق من صلاحيتها"""
+  """فحص البطاقة وتسجيل الحركة مع إرسال تنبيه فوري عبر تيليجرام عند الرفض"""
+
   card = db.query(Card).filter(Card.card_id == card_id).first()
 
   if not card or not card.is_active:
+    error_reason = "Card Inactive / Not Found"
+    log_entry = AccessLog(
+        card_id=card_id,
+        user_name="مجهول / غير مسجل",
+        status_message=f"Access Denied: {error_reason}",
+    )
+    db.add(log_entry)
+    db.commit()
+
+    # إرسال إشعار تيليجرام فوري
+    await notify_admins_or_user(db, error_reason, card_id)
+
     return JSONResponse(
-        status_code=403,
-        content={"access": False, "message": "Access Denied: Card Inactive"},
+        status_code=403, content={"access": False, "message": error_reason}
     )
 
   user = db.query(User).filter(User.id == card.user_id).first()
+  user_name = user.name if user else "مستخدم غير معروف"
+
   if not user or not user.is_active:
+    error_reason = "User Blocked"
+    log_entry = AccessLog(
+        card_id=card_id, user_name=user_name, status_message=error_reason
+    )
+    db.add(log_entry)
+    db.commit()
+    await notify_admins_or_user(db, error_reason, card_id)
     return JSONResponse(
-        status_code=403,
-        content={"access": False, "message": "Access Denied: User Blocked"},
+        status_code=403, content={"access": False, "message": error_reason}
     )
 
   if card.is_temporary and card.expiry_time:
     if datetime.now() > card.expiry_time:
+      error_reason = "Temporary Card Expired"
+      log_entry = AccessLog(
+          card_id=card_id, user_name=user_name, status_message=error_reason
+      )
+      db.add(log_entry)
+      db.commit()
+      await notify_admins_or_user(db, error_reason, card_id)
       return JSONResponse(
-          status_code=403,
-          content={
-              "access": False,
-              "message": "Access Denied: Temporary Card Expired",
-          },
+          status_code=403, content={"access": False, "message": error_reason}
       )
 
   current_hour = datetime.now().hour
   if not (card.start_hour <= current_hour < card.end_hour):
+    error_reason = "Outside Work Hours"
+    log_entry = AccessLog(
+        card_id=card_id, user_name=user_name, status_message=error_reason
+      )
+    db.add(log_entry)
+    db.commit()
+    await notify_admins_or_user(db, error_reason, card_id)
     return JSONResponse(
-        status_code=403,
-        content={
-            "access": False,
-            "message": "Access Denied: Outside Work Hours",
-        },
+        status_code=403, content={"access": False, "message": error_reason}
     )
+
+  # نجاح الدخول
+  log_entry = AccessLog(
+      card_id=card_id,
+      user_name=user_name,
+      status_message="Access Granted (Success)",
+  )
+  db.add(log_entry)
+  db.commit()
 
   return JSONResponse(
       status_code=200,
       content={
           "access": True,
           "message": "Access Granted",
-          "user_name": user.name,
+          "user_name": user_name,
           "card_id": card_id,
       },
   )
 
 
-@app.get("/api/device/{device_id}/poll-command")
-async def poll_remote_command(device_id: str, db: Session = Depends(get_db)):
-  """
-  يستعلم جهاز ESP32 دورياً (كل بضع ثوانٍ) لمعرفة
-  ما إذا كان هناك أمر فتح صدر من التطبيق عن بعد
-  """
-  device = db.query(Device).filter(Device.device_id == device_id).first()
+# ==============================================================================
+# 6. مسارات الإدارة والتليجرام Webhook
+# ==============================================================================
+@app.get("/api/logs")
+async def get_access_logs(db: Session = Depends(get_db)):
+  logs = db.query(AccessLog).order_by(AccessLog.timestamp.desc()).all()
+  return {
+      "status": "success",
+      "total_logs": len(logs),
+      "logs": [
+          {
+              "id": log.id,
+              "user_name": log.user_name,
+              "card_id": log.card_id,
+              "status": log.status_message,
+              "timestamp": log.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+          }
+          for log in logs
+      ],
+  }
 
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
+  """استقبال رسائل تيليجرام (يمكن للمستخدم إرسال /start لربط حسابه تلقائياً)"""
+  data = await request.json()
+  if "message" in data:
+    chat_id = data["message"]["chat"]["id"]
+    text = data["message"].get("text", "")
+
+    if text == "/start":
+      async with httpx.AsyncClient() as client:
+        await client.post(
+            f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": (
+                    "مرحباً بك في نظام Smart Lock. لاستلام التنبيهات الأمنية،"
+                    " يرجى ربط حسابك عبر التطبيق أو تزويدنا برمزك التعريفي"
+                    f" (Chat ID الخاص بك هو: {chat_id})."
+                ),
+            },
+        )
+  return {"status": "ok"}
+
+
+@app.post("/api/device/{device_id}/poll-command")
+async def poll_remote_command(device_id: str, db: Session = Depends(get_db)):
+  device = db.query(Device).filter(Device.device_id == device_id).first()
   if device and device.unlock_requested:
-    # إعادة تعيين الحالة فور قراءتها لكي يفتح الباب مرة واحدة فقط
     device.unlock_requested = False
     db.commit()
     return {"command": "UNLOCK"}
-
   return {"command": "IDLE"}
 
 
-# ==============================================================================
-# 6. مسارات التحكم والإدارة (للأمشرف أو التطبيق)
-# ==============================================================================
 @app.post("/api/device/{device_id}/remote-unlock")
 async def trigger_remote_unlock(device_id: str, db: Session = Depends(get_db)):
-  """
-  زر الفتح عن بعد: يضغط المستخدم في التطبيق على 'فتح الباب'
-  فيقوم هذا المسار بتغيير حالة الجهاز ليتم فتح القفل فوراً عند استعلام ESP32 القادم
-  """
   device = db.query(Device).filter(Device.device_id == device_id).first()
   if not device:
-    # إنشاء السجل تلقائياً في حال لم يكن مسجلاً
     device = Device(device_id=device_id, unlock_requested=True)
     db.add(device)
   else:
     device.unlock_requested = True
-
   db.commit()
-  return {
-      "status": "success",
-      "message": "تم إرسال أمر الفتح عن بعد إلى القفل بنجاح",
-  }
+  return {"status": "success", "message": "تم إرسال أمر الفتح عن بعد بنجاح"}
 
 
 @app.post("/api/cards/add")
@@ -318,11 +481,10 @@ async def add_card(
 
 
 @app.post("/api/users/toggle-status")
-async def toggle_user_status(user_id: int, is_active: bool, db: Session = Depends(get_db)):
+async def toggle_user_status(user_id: int, is_active: bool, db: Session = Depends(get_db):
   user = db.query(User).filter(User.id == user_id).first()
   if not user:
     raise HTTPException(status_code=404, detail="المستخدم غير موجود")
-
   user.is_active = is_active
   db.commit()
   status_text = "تم تفعيل" if is_active else "تم حظر"
